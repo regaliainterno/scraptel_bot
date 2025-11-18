@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -31,6 +32,24 @@ CONFIG_KEYS = {
     "tiktok_username": "Username do TikTok sem @",
 }
 
+def load_env_file(path: Path) -> None:
+    """Carrega pares KEY=VALUE de um arquivo `.env` sem sobrescrever variáveis já definidas."""
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, separator, value = line.partition("=")
+        if not separator:
+            continue
+        key = key.strip()
+        if not key:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
 
 
 class ConfigManager:
@@ -517,11 +536,12 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
+    load_env_file(Path(".env"))
     config_path = Path("config.json")
     config = ConfigManager(config_path)
-    token = config.get("telegram_token")
+    token = os.environ.get("TELEGRAM_TOKEN") or config.get("telegram_token")
     if not token:
-        raise RuntimeError("Defina telegram_token no config.json.")
+        raise RuntimeError("Defina TELEGRAM_TOKEN em .env ou via variável de ambiente.")
     bot = TelegramBot(config)
     application = Application.builder().token(token).build()
     application.add_handler(CommandHandler("start", bot.start))

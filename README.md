@@ -28,16 +28,16 @@ pip install -r requirements.txt
 ```
 
 ## Configuração
-1. Copie o arquivo de exemplo:
+1. Crie o `.env` com o token do BotFather:
    ```bash
-   copy config.json.example config.json  # Windows
-   # ou cp config.json.example config.json no Linux/macOS
+   copy .env.example .env  # Windows
+   # ou cp .env.example .env no Linux/macOS
    ```
+   Abra `.env` e defina TELEGRAM_TOKEN=seu-token-do-bot.
 2. Abra `config.json` e configure:
-   - `telegram_token`: token do BotFather.
    - `authorized_user_id`: seu ID numérico.
    - `cache_ttl_seconds`: TTL do cache em segundos (máx. 600 recomendado para evitar bloqueios).
-   - `profiles`: atualize cada URL/username conforme necessário. Use handles completos (com `https://`) e usernames sem `@` quando especificado.
+   - `profiles`: atualize cada URL/username conforme necessário. Use handles completos (com https://) e usernames sem @ quando especificado.
 3. Inicie o bot para validar:
    ```bash
    python bot.py
@@ -89,7 +89,7 @@ pip install -r requirements.txt
 ## Segurança e privacidade
 - O bot ignora qualquer usuário cujo `id` seja diferente de `authorized_user_id`.
 - Para dar acesso a outra pessoa, ajuste `authorized_user_id` ou implemente uma lista (o comando `/config` pode ser extendido facilmente).
-- Nunca exponha seu `telegram_token`. Mantenha `config.json` fora de repositórios públicos.
+- Nunca exponha seu `telegram_token`. Mantenha `.env` fora do controle de versão e `config.json` fora de repositórios públicos.
 
 ## Logs e tratamento de erros
 - Logs vão para stdout (veja `logging.basicConfig` em `bot.py`). Em produção, use `journalctl -u telegram-stats-bot -f`.
