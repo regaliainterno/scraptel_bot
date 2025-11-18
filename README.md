@@ -7,7 +7,8 @@ Bot privado de Telegram escrito em Python para monitorar em tempo real YouTube (
 - `/stats`: coleta imediata dos números (ou usa cache de até 10 min) e responde com formatação amigável.
 - `/config`: permite ajustar URLs/usernames diretamente pelo Telegram, salvando em `config.json`.
 - Tratamento de erros: quando um site bloqueia ou não responde, aparece “indisponível/bloqueado” em vez de travar.
-- Cache com TTL configurável (`cache_ttl_seconds`), padrão 600 s.
+- Cache com TTL configurável (`cache_ttl_seconds`), padrão 600 s.
+- Envio automático das estatísticas para o chat configurado (`stats_chat_id`) usando a mesma cadência do cache (padrão 600 s).
 - Restringe o acesso ao `authorized_user_id`.
 
 ## Pré-requisitos
@@ -26,6 +27,7 @@ python -m venv .venv
 pip install --upgrade pip
 pip install -r requirements.txt
 ```
+> O `requirements.txt` já instala o extra `python-telegram-bot[job-queue]`, que habilita o `JobQueue` usado pelo envio automático de estatísticas.
 
 ## Configuração
 1. Crie o `.env` com o token do BotFather:
@@ -37,6 +39,8 @@ pip install -r requirements.txt
 2. Abra `config.json` e configure:
    - `authorized_user_id`: seu ID numérico.
    - `cache_ttl_seconds`: TTL do cache em segundos (máx. 600 recomendado para evitar bloqueios).
+   - `stats_chat_id`: ID numérico do chat/grupo onde as estatísticas devem ser enviadas automaticamente (prefixe com `-100` para supergrupos/canais).
+   - `broadcast_interval_seconds`: opcional, altera a frequência do envio automático (deve ser >= 1; padrão é o valor de `cache_ttl_seconds` ou 600 s se ausente).
    - `profiles`: atualize cada URL/username conforme necessário. Use handles completos (com https://) e usernames sem @ quando especificado.
 3. Inicie o bot para validar:
    ```bash

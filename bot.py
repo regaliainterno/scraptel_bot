@@ -12,6 +12,7 @@ from typing import Any, Dict, Iterable, Optional, Tuple
 from urllib.parse import urlparse
 
 import cloudscraper
+import requests
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -277,22 +278,73 @@ class PlatformScraper:
             raise RuntimeError(message)
         return payload
 
-    def _tiktok_stats(self, username: str) -> Dict[str, Any]:
-        logging.info("Atualizando TikTok (TokCount) para @%s", username)
+    def _normalize_tiktok_stat(self, value: Any) -> Optional[int]:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return int(value)
+        digits = "".join(ch for ch in str(value) if ch.isdigit())
+        return int(digits) if digits else None
+
+    def _parse_tiktok_web_stats(self, html: str) -> Tuple[str, Dict[str, Optional[int]]]:
+        match = re.search(
+            r'<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">(?P<data>{.*?})</script>',
+            html,
+            re.S,
+        )
+        if not match:
+            raise RuntimeError("TokCount falhou e os dados da página do TikTok não foram encontrados.")
         try:
-            user_payload = self._tokcount_get(
-                f"/user/data/{username}", include_identity=True
-            )
-            user_id = user_payload.get("userId")
-            if not user_id:
-                raise RuntimeError("TokCount nuo retornou o identificador do usuorio.")
-            stats_payload = self._tokcount_get(f"/user/stats/{user_id}")
-        except TemporaryBlockError as exc:
-            logging.warning("tiktok bloqueado: %s", exc)
-            return {"status": "blocked", "message": str(exc)}
-        except Exception as exc:
-            logging.exception("Erro coletando TikTok via TokCount")
-            return {"status": "error", "message": str(exc)}
+            data = json.loads(match.group("data"))
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Erro parseando os dados do TikTok.") from exc
+        scope = data.get("__DEFAULT_SCOPE__", {})
+        user_detail = scope.get("webapp.user-detail")
+        if not user_detail:
+            raise RuntimeError("TikTok não retornou os dados esperados (webapp.user-detail ausente).")
+        user_info = user_detail.get("userInfo", {})
+        stats = user_info.get("stats")
+        if not stats:
+            raise RuntimeError("TikTok não retornou as estatísticas do usuário.")
+        user = user_info.get("user", {})
+        identifier = user.get("uniqueId") or ""
+        parsed_stats = {
+            "followers": self._normalize_tiktok_stat(stats.get("followerCount")),
+            "likes": self._normalize_tiktok_stat(
+                stats.get("heartCount") or stats.get("heart")
+            ),
+            "following": self._normalize_tiktok_stat(stats.get("followingCount")),
+            "videos": self._normalize_tiktok_stat(stats.get("videoCount")),
+        }
+        return identifier, parsed_stats
+
+    def _tiktok_stats_page(self, username: str) -> Dict[str, Any]:
+        logging.info("Atualizando TikTok (fallback web) para @%s", username)
+        url = f"https://www.tiktok.com/@{username}"
+        response = self.http.get(url, timeout=30, headers={"Referer": "https://www.tiktok.com/"})
+        if response.status_code != 200:
+            raise RuntimeError(f"TikTok respondeu com status {response.status_code}.")
+        identifier, parsed_stats = self._parse_tiktok_web_stats(response.text)
+        return {
+            "status": "ok",
+            "identifier": f"@{identifier or username}",
+            "followers": parsed_stats["followers"],
+            "likes": parsed_stats["likes"],
+            "following": parsed_stats["following"],
+            "videos": parsed_stats["videos"],
+        }
+
+    def _tokcount_stats(self, username: str) -> Dict[str, Any]:
+        logging.info("Atualizando TikTok (TokCount) para @%s", username)
+        user_payload = self._tokcount_get(
+            f"/user/data/{username}", include_identity=True
+        )
+        user_id = user_payload.get("userId")
+        if not user_id:
+            raise RuntimeError("TokCount nuo retornou o identificador do usuorio.")
+        stats_payload = self._tokcount_get(
+            f"/user/stats/{user_id}", include_identity=True
+        )
         return {
             "status": "ok",
             "identifier": f"@{user_payload.get('username') or username}",
@@ -301,6 +353,32 @@ class PlatformScraper:
             "following": stats_payload.get("followingCount"),
             "videos": stats_payload.get("videoCount"),
         }
+
+    def _tiktok_stats(self, username: str) -> Dict[str, Any]:
+        fallback_reason: Optional[Tuple[str, str]] = None
+        try:
+            return self._tokcount_stats(username)
+        except TemporaryBlockError as exc:
+            logging.warning("TokCount bloqueado para TikTok: %s", exc)
+            fallback_reason = ("blocked", str(exc))
+        except requests.RequestException as exc:
+            logging.warning("TokCount retornou HTTP error para TikTok: %s", exc)
+            fallback_reason = ("error", str(exc))
+        except Exception as exc:
+            logging.exception("Erro coletando TikTok via TokCount")
+            fallback_reason = ("error", str(exc))
+        try:
+            if fallback_reason:
+                logging.info(
+                    "Usando fallback de scraping do TikTok após falha no TokCount: %s",
+                    fallback_reason[1],
+                )
+            return self._tiktok_stats_page(username)
+        except Exception as fallback_exc:
+            logging.exception("Erro coletando TikTok via fallback sem TokCount")
+            if fallback_reason and fallback_reason[0] == "blocked":
+                return {"status": "blocked", "message": fallback_reason[1]}
+            return {"status": "error", "message": str(fallback_exc)}
 
 class StatsCache:
     """Cache simples com TTL para evitar bloqueios desnecessários."""
@@ -337,8 +415,19 @@ class StatsCollector:
         logging.info("Cache expirado, coletando estatísticas em tempo real.")
         results = await self._collect()
         results["generated_at"] = datetime.now(timezone.utc)
-        self.cache.set(results)
+        if self._should_cache(results):
+            self.cache.set(results)
+        else:
+            logging.info("Não armazenando cache porque uma plataforma retornou erro ou bloqueio.")
         return results
+
+    def _should_cache(self, results: Dict[str, Any]) -> bool:
+        for payload in results.values():
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("status") != "ok":
+                return False
+        return True
 
     async def _collect(self) -> Dict[str, Any]:
         tasks = [
@@ -377,6 +466,34 @@ class TelegramBot:
         self.config = config
         self.collector = StatsCollector(config)
 
+    def get_stats_chat_id(self) -> Optional[int]:
+        """Retorna o chat id configurado para envio automático ou None."""
+        chat_id = self.config.get("stats_chat_id")
+        if chat_id is None:
+            return None
+        try:
+            return int(chat_id)
+        except (TypeError, ValueError):
+            logging.warning("stats_chat_id inválido: %s", chat_id)
+            return None
+
+    async def broadcast_stats_job(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        chat_id = self.get_stats_chat_id()
+        if not chat_id:
+            return
+        logging.info("Enviando estatísticas automáticas para %s", chat_id)
+        try:
+            data = await self.collector.get_stats()
+            message = format_stats_message(data, self.config)
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=message,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+        except Exception:
+            logging.exception("Erro enviando estatísticas automáticas")
+
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = (
             "👋 Olá! Use /stats para ver as métricas em tempo real.\n"
@@ -396,7 +513,13 @@ class TelegramBot:
         await safe_reply(update, context, "⏳ Buscando estatísticas atualizadas, aguarde...")
         data = await self.collector.get_stats()
         message = format_stats_message(data, self.config)
-        await safe_reply(update, context, message, parse_mode=ParseMode.HTML)
+        await safe_reply(
+            update,
+            context,
+            message,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
 
     async def config_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not ensure_authorized(update, self.config):
@@ -554,6 +677,32 @@ def main() -> None:
         fallbacks=[CommandHandler("cancel", bot.cancel_config)],
     )
     application.add_handler(conv_handler)
+    broadcast_interval = config.get("broadcast_interval_seconds")
+    if broadcast_interval is None:
+        broadcast_interval = config.get("cache_ttl_seconds", 600)
+    try:
+        broadcast_interval = int(broadcast_interval)
+    except (TypeError, ValueError):
+        broadcast_interval = config.get("cache_ttl_seconds", 600)
+    broadcast_interval = max(1, broadcast_interval)
+    stats_chat_id = bot.get_stats_chat_id()
+    if stats_chat_id is not None:
+        job_queue = application.job_queue
+        if job_queue is None:
+            logging.warning(
+                "JobQueue não está configurado; instale python-telegram-bot[job-queue] para habilitar o envio automático."
+            )
+        else:
+            job_queue.run_repeating(
+                bot.broadcast_stats_job,
+                interval=broadcast_interval,
+                first=0,
+            )
+
+            logging.info(
+                "Agendado envio automático de estatísticas a cada %d segundos",
+                broadcast_interval,
+            )
     logging.info("Bot iniciado. Pressione Ctrl+C para sair.")
     application.run_polling(close_loop=False)
 
